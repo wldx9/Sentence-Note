@@ -637,6 +637,28 @@
             hideError();
         }
 
+        // 이미지 전처리 함수 (대비 극대화 및 흑백 이진화)
+        function preprocessImage(imgElement) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = imgElement.naturalWidth || imgElement.width;
+            canvas.height = imgElement.naturalHeight || imgElement.height;
+
+            ctx.drawImage(imgElement, 0, 0);
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const d = imgData.data;
+
+            for (let i = 0; i < d.length; i += 4) {
+                const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
+                const v = avg < 145 ? 0 : 255;
+                d[i] = v;
+                d[i + 1] = v;
+                d[i + 2] = v;
+            }
+            ctx.putImageData(imgData, 0, 0);
+            return canvas.toDataURL('image/png');
+        }
+
         async function runOCR() {
             if (!state.selectedFile) return;
             hideError();
@@ -646,6 +668,9 @@
 
             const lang = DOM.ocrLanguage.value;
             try {
+                // 전처리된 이미지 데이터 생성
+                const processedUrl = preprocessImage(DOM.imagePreview);
+
                 const worker = await Tesseract.createWorker(lang, 1, {
                     logger: m => {
                         if (m.status === 'recognizing text') {
@@ -654,7 +679,13 @@
                         }
                     }
                 });
-                const ret = await worker.recognize(state.selectedFile);
+
+                // 블록 단위 스캔 모드 설정
+                await worker.setParameters({
+                    tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK,
+                });
+
+                const ret = await worker.recognize(processedUrl);
                 await worker.terminate();
 
                 state.rawText = ret.data.text;
@@ -675,18 +706,27 @@
             }
         }
 
+        // 줄바꿈 보정 및 정교한 문장 분리 함수
         function splitSentencesFromRawText() {
-            const raw = DOM.rawTextEditor.value;
+            let raw = DOM.rawTextEditor.value;
             if (!raw) return;
-            const lines = raw.split(/\r?\n/);
+
+            // 1) 억지로 잘린 줄바꿈을 문장 부호(。, ？！, !) 기준 이전까지 하나로 이어붙임
+            const cleanText = raw.replace(/([^。！？.?!])\n+/g, '$1 ');
+
+            // 2) 완성된 문장 부호 기준으로 정확하게 분리
+            const matches = cleanText.match(/[^。！？.?!]+[。！？.?!]+["'」』]?|[^。！？.?!]+$/g);
+
             let result = [];
-            lines.forEach(line => {
-                const trimmed = line.trim();
-                if (!trimmed) return;
-                const matched = trimmed.match(/[^。！？.?!]+[。！？.?!]+["'」』]?|[^。！？.?!]+$/g);
-                if (matched) matched.forEach(s => { if (s.trim()) result.push(s.trim()); });
-                else result.push(trimmed);
-            });
+            if (matches) {
+                matches.forEach(s => {
+                    const trimmed = s.trim().replace(/\s+/g, ' ');
+                    if (trimmed) result.push(trimmed);
+                });
+            } else {
+                result = [raw.trim()];
+            }
+
             state.sentences = result.length > 0 ? result : [raw.trim()];
             renderSentenceEditorList();
         }
